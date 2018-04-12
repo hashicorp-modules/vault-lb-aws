@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 0.11.5"
+  required_version = ">= 0.11.6"
 }
 
 provider "aws" {
@@ -71,6 +71,49 @@ resource "aws_security_group_rule" "outbound_tcp" {
   cidr_blocks       = ["0.0.0.0/0"]
 }
 
+resource "random_id" "vault_lb_access_logs" {
+  count = "${var.create && var.lb_logs_enabled ? 1 : 0}"
+
+  byte_length = 8
+  prefix      = "${format("%s-vault-lb-access-logs-", var.name)}"
+}
+
+data "aws_elb_service_account" "vault_lb_access_logs" {
+  count = "${var.create && var.lb_logs_enabled ? 1 : 0}"
+}
+
+resource "aws_s3_bucket" "vault_lb_access_logs" {
+  count = "${var.create && var.lb_logs_enabled ? 1 : 0}"
+
+  bucket = "${random_id.vault_lb_access_logs.hex}"
+  acl    = "private"
+  tags   = "${merge(var.tags, map("Name", format("%s-vault-lb-access-logs", var.name)))}"
+
+  force_destroy = true
+
+  policy = <<POLICY
+{
+  "Id": "Policy",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LBAccessLogs",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::${random_id.vault_lb_access_logs.hex}${var.lb_logs_prefix != "" ? format("//", var.lb_logs_prefix) : ""}/AWSLogs/*",
+      "Principal": {
+        "AWS": [
+          "${data.aws_elb_service_account.vault_lb_access_logs.arn}"
+        ]
+      }
+    }
+  ]
+}
+POLICY
+}
+
 resource "random_id" "vault_lb" {
   count = "${var.create ? 1 : 0}"
 
@@ -86,17 +129,23 @@ resource "aws_lb" "vault" {
   subnets         = ["${var.subnet_ids}"]
   security_groups = ["${aws_security_group.vault_lb.id}"]
   tags            = "${merge(var.tags, map("Name", format("%s-vault-lb", var.name)))}"
+
+  access_logs {
+    bucket  = "${var.lb_logs_bucket != "" ? var.lb_logs_bucket : aws_s3_bucket.vault_lb_access_logs.id}"
+    prefix  = "${var.lb_logs_prefix}"
+    enabled = "${var.lb_logs_enabled}"
+  }
 }
 
 resource "random_id" "vault_http_8200" {
-  count = "${var.create ? 1 : 0}"
+  count = "${var.create && !var.use_lb_cert ? 1 : 0}"
 
   byte_length = 4
   prefix      = "vault-http-8200-"
 }
 
 resource "aws_lb_target_group" "vault_http_8200" {
-  count = "${var.create ? 1 : 0}"
+  count = "${var.create && !var.use_lb_cert ? 1 : 0}"
 
   name     = "${random_id.vault_http_8200.hex}"
   vpc_id   = "${var.vpc_id}"
@@ -108,9 +157,9 @@ resource "aws_lb_target_group" "vault_http_8200" {
     interval = 15
     timeout  = 5
     protocol = "HTTP"
-    port     = 8200
-    path     = "/ui"
-    matcher  = "200"
+    port     = "traffic-port"
+    path     = "/v1/sys/health?standbyok=true"
+    matcher  = "200,429"
 
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -118,7 +167,7 @@ resource "aws_lb_target_group" "vault_http_8200" {
 }
 
 resource "aws_lb_listener" "vault_80" {
-  count = "${var.create ? 1 : 0}"
+  count = "${var.create && !var.use_lb_cert ? 1 : 0}"
 
   load_balancer_arn = "${aws_lb.vault.arn}"
   port              = "80"
@@ -133,9 +182,11 @@ resource "aws_lb_listener" "vault_80" {
 resource "aws_iam_server_certificate" "vault" {
   count = "${var.create && var.use_lb_cert ? 1 : 0}"
 
-  name             = "${random_id.vault_lb.hex}"
-  certificate_body = "${var.lb_cert}"
-  private_key      = "${var.lb_private_key}"
+  name              = "${random_id.vault_lb.hex}"
+  certificate_body  = "${var.lb_cert}"
+  private_key       = "${var.lb_private_key}"
+  certificate_chain = "${var.lb_cert_chain}"
+  path              = "/${var.name}-${random_id.vault_lb.hex}/"
 }
 
 resource "random_id" "vault_https_8200" {
@@ -158,9 +209,9 @@ resource "aws_lb_target_group" "vault_https_8200" {
     interval = 15
     timeout  = 5
     protocol = "HTTPS"
-    port     = 8200
-    path     = "/ui"
-    matcher  = "200"
+    port     = "traffic-port"
+    path     = "/v1/sys/health?standbyok=true"
+    matcher  = "200,429"
 
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -192,7 +243,7 @@ resource "aws_lb_listener" "vault_8200" {
   certificate_arn   = "${var.use_lb_cert ? element(concat(aws_iam_server_certificate.vault.*.arn, list("")), 0) : ""}" # TODO: Workaround for issue #11210
 
   default_action {
-    target_group_arn = "${var.use_lb_cert ? element(concat(aws_lb_target_group.vault_https_8200.*.arn, list("")), 0) : aws_lb_target_group.vault_http_8200.arn}" # TODO: Workaround for issue #11210
+    target_group_arn = "${var.use_lb_cert ? element(concat(aws_lb_target_group.vault_https_8200.*.arn, list("")), 0) : element(concat(aws_lb_target_group.vault_http_8200.*.arn, list("")), 0)}" # TODO: Workaround for issue #11210
     type             = "forward"
   }
 }
