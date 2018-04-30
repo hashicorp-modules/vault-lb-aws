@@ -19,7 +19,7 @@ data "aws_ami" "base" {
 }
 
 module "network_aws" {
-  # source = "github.com/hashicorp-modules/network-aws?ref=f-refactor"
+  # source = "github.com/hashicorp-modules/network-aws"
   source = "../../../network-aws"
 
   name              = "${var.name}"
@@ -32,7 +32,7 @@ module "network_aws" {
 }
 
 module "vault_lb_aws" {
-  # source = "github.com/hashicorp-modules/vault-lb-aws?ref=f-refactor"
+  # source = "github.com/hashicorp-modules/vault-lb-aws"
   source = "../../../vault-lb-aws"
 
   name           = "${var.name}"
