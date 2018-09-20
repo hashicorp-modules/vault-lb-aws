@@ -14,6 +14,10 @@ output "vault_lb_dns" {
   value = "${element(concat(aws_lb.vault.*.dns_name, list("")), 0)}" # TODO: Workaround for issue #11210
 }
 
+output "vault_lb_zone_id" {
+  value = "${element(concat(aws_lb.vault.*.zone_id, list("")), 0)}" # TODO: Workaround for issue #11210
+}
+
 output "vault_lb_arn" {
   value = "${element(concat(aws_lb.vault.*.arn, list("")), 0)}" # TODO: Workaround for issue #11210
 }
